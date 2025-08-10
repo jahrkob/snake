@@ -68,6 +68,10 @@
     .section{ padding:12px; border-radius:12px; background:#0b1220; border:1px solid rgba(148,163,184,.15) }
     .section h3{ margin:0 0 8px; font-size:14px; letter-spacing:.3px; text-transform:uppercase; color:var(--muted) }
 
+    /* Session buttons: symmetrical layout */
+    .session-actions{ display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:8px }
+    .session-actions .btn{ width:100% }
+
     .row{ display:flex; align-items:center; gap:10px; margin:10px 0 }
     .row label{ width:140px; font-size:14px; color:#cbd5e1 }
     .row input[type="number"], .row input[type="range"], .row select{
@@ -149,9 +153,10 @@
 
         <div class="section">
           <h3>Session</h3>
-          <div style="display:flex; gap:8px; flex-wrap:wrap">
+          <div class="session-actions">
             <button id="btnApply" class="btn btn-primary" title="Apply settings & restart">Apply Changes</button>
             <button id="btnResetBest" class="btn btn-danger" title="Clear best score">Reset Best</button>
+            <button id="btnDefaults" class="btn" title="Restore default settings">Reset to Defaults</button>
           </div>
           <p class="small" style="margin-top:10px">Settings apply on restart. Best score is saved per ruleset (grid, apples, wrap, speed).</p>
         </div>
@@ -289,12 +294,35 @@
       state.best = loadBest(); bestEl.textContent = state.best;
     }
 
+    function resetDefaults(){
+      // Restore defaults, persist, and restart
+      cfg = { ...defaultConfig };
+      // Update UI controls
+      for(const k of Object.keys(defaultConfig)){
+        if(inputs[k]) inputs[k].type==='checkbox' ? inputs[k].checked = cfg[k] : inputs[k].value = cfg[k];
+      }
+      labels.gridW.textContent = cfg.gridW;
+      labels.gridH.textContent = cfg.gridH;
+      labels.apples.textContent = cfg.apples;
+      labels.speed.textContent = cfg.speed;
+      speedLabel.textContent = `${cfg.speed} tps`;
+      document.documentElement.style.setProperty('--accent', cfg.snakeColor);
+      localStorage.setItem('snake_cfg_v1', JSON.stringify(cfg));
+      over.style.display = 'none';
+      showToast('Defaults restored');
+      initGame();
+      // reflect best for the default ruleset
+      state.best = loadBest(); bestEl.textContent = state.best;
+    }
+
     function resizeCanvas(){
       // Fit square area while respecting DPI
       const rect = canvas.parentElement.getBoundingClientRect();
-      const size = Math.min(rect.width - 20, window.innerHeight - 250, 900);
+      const maxSize = Math.min(rect.width - 20, window.innerHeight - 250, 900);
+      const cells = Math.max(cfg.gridW, cfg.gridH);
+      const cell = Math.max(8, Math.floor(maxSize / cells));
+      const px = Math.max(300, cell * cells);
       const dpr = window.devicePixelRatio || 1;
-      const px = Math.max(300, Math.floor(size));
       canvas.style.width = px + 'px';
       canvas.style.height = px + 'px';
       canvas.width = Math.floor(px * dpr);
@@ -305,6 +333,21 @@
     window.addEventListener('resize', ()=>{ resizeCanvas(); draw(0); });
 
     // ===== Helpers
+    // color helpers for adaptive grid lines
+    function hexToRgb(hex){
+      hex = hex.replace('#','');
+      if(hex.length===3){ hex = hex.split('').map(ch=>ch+ch).join(''); }
+      const num = parseInt(hex,16);
+      return { r: (num>>16)&255, g: (num>>8)&255, b: num&255 };
+    }
+    function mixRgb(a,b,t){ return { r: Math.round(a.r + (b.r-a.r)*t), g: Math.round(a.g + (b.g-a.g)*t), b: Math.round(a.b + (b.b-a.b)*t) }; }
+    function gridStrokeFrom(bgHex){
+      const c = hexToRgb(bgHex);
+      const L = (0.2126*c.r + 0.7152*c.g + 0.0722*c.b) / 255; // relative luminance-ish
+      const target = L < 0.5 ? mixRgb(c,{r:255,g:255,b:255},0.7) : mixRgb(c,{r:0,g:0,b:0},0.7);
+      return `rgba(${target.r},${target.g},${target.b},0.28)`;
+    }
+
     function posKey(p){ return `${p.x},${p.y}` }
     function fromKey(k){ const [x,y]=k.split(',').map(Number); return {x,y} }
 
@@ -391,13 +434,15 @@
     // ===== Rendering
     function draw(){
       // compute cell size
-      const s = canvas.getBoundingClientRect();
+      const cssW = parseFloat(getComputedStyle(canvas).width);
+      const cssH = parseFloat(getComputedStyle(canvas).height);
+      const s = { width: cssW, height: cssH };
       const cell = Math.floor(Math.min(s.width/cfg.gridW, s.height/cfg.gridH));
       ctx.imageSmoothingEnabled = false;
 
       // clear board
       ctx.fillStyle = cfg.boardColor;
-      ctx.fillRect(0,0, canvas.width, canvas.height);
+      ctx.fillRect(0,0, s.width, s.height);
 
       // draw subtle vignette
       ctx.save();
@@ -408,7 +453,7 @@
 
       // grid lines
       if(cfg.gridLines){
-        ctx.strokeStyle = 'rgba(148,163,184,0.12)';
+        ctx.strokeStyle = gridStrokeFrom(cfg.boardColor);
         ctx.lineWidth = 1;
         for(let x=0;x<=cfg.gridW;x++){
           ctx.beginPath(); ctx.moveTo(x*cell+.5, 0); ctx.lineTo(x*cell+.5, cfg.gridH*cell); ctx.stroke();
@@ -497,8 +542,17 @@
     controls.restart.addEventListener('click', restart);
     controls.tryAgain.addEventListener('click', ()=>{ over.style.display='none'; restart(); });
     controls.closeOver.addEventListener('click', ()=>{ over.style.display='none'; });
-    controls.apply.addEventListener('click', applySettings);
-    controls.resetBest.addEventListener('click', ()=>{ localStorage.removeItem(bestKey()); state.best = 0; bestEl.textContent = '0'; showToast('Best cleared for this ruleset'); });
+    if(controls.apply) controls.apply.addEventListener('click', applySettings);
+    if (controls.resetBest) {
+    controls.resetBest.addEventListener('click', () => {
+      localStorage.removeItem(bestKey());
+      state.best = 0;
+      bestEl.textContent = '0';
+      showToast('Best cleared for this ruleset');
+    });
+    }
+    controls.defaults = $('#btnDefaults');
+    if(controls.defaults) controls.defaults.addEventListener('click', resetDefaults);
 
     // Live labels
     for(const k of ['gridW','gridH','apples','speed']){
